@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -183,22 +185,107 @@ func nonEmpty(v ...string) []string {
 	return out
 }
 
-// search looks a name up on OpenStreetMap, near a spot when one is given.
+// search looks a name up on OpenStreetMap. Near a spot it first looks only
+// around it (about 25 km: "San Remo" is the restaurant in town, not the
+// Italian city), nearest first, and only then everywhere.
 func (s *Server) search(ctx context.Context, q string, near *[2]float64) ([]Found, error) {
 	v := url.Values{"q": {q}, "format": {"jsonv2"}, "addressdetails": {"1"}, "extratags": {"1"}, "limit": {"8"}}
-	if near != nil {
-		d := 0.25 // about 25 km around
-		v.Set("viewbox", fmt.Sprintf("%.4f,%.4f,%.4f,%.4f", near[1]-d, near[0]+d, near[1]+d, near[0]-d))
-	}
 	var res []nomPlace
-	if err := s.nomGet(ctx, "/search", v, &res); err != nil {
-		return nil, err
+	if near != nil {
+		d := 0.25
+		v.Set("viewbox", fmt.Sprintf("%.4f,%.4f,%.4f,%.4f", near[1]-d, near[0]+d, near[1]+d, near[0]-d))
+		v.Set("bounded", "1")
+		if err := s.nomGet(ctx, "/search", v, &res); err != nil {
+			return nil, err
+		}
+		v.Del("bounded")
+	}
+	if len(res) == 0 {
+		if err := s.nomGet(ctx, "/search", v, &res); err != nil {
+			return nil, err
+		}
 	}
 	out := make([]Found, 0, len(res))
 	for _, n := range res {
 		out = append(out, n.found())
 	}
+	if near != nil {
+		dist := func(f Found) float64 {
+			if f.Lat == nil {
+				return 1e12
+			}
+			return store.Meters(near[0], near[1], *f.Lat, *f.Lng)
+		}
+		sort.SliceStable(out, func(i, j int) bool { return dist(out[i]) < dist(out[j]) })
+	}
 	return out, nil
+}
+
+// findByName finds the place a name means: within about 25 km of the person
+// (that one, nearest first), else in the person's own country, else
+// anywhere — then the places of that name to pick from, venues (a
+// restaurant, a café) before towns, nearest first.
+func (s *Server) findByName(ctx context.Context, name string, near *[2]float64) (*Found, []Found) {
+	base := url.Values{"q": {name}, "format": {"jsonv2"}, "addressdetails": {"1"}, "extratags": {"1"}, "limit": {"10"}}
+	run := func(extra url.Values) []Found {
+		v := url.Values{}
+		for k, x := range base {
+			v[k] = x
+		}
+		for k, x := range extra {
+			v[k] = x
+		}
+		var res []nomPlace
+		if err := s.nomGet(ctx, "/search", v, &res); err != nil {
+			return nil
+		}
+		out := []Found{}
+		for _, n := range res {
+			out = append(out, n.found())
+		}
+		return out
+	}
+	dist := func(f Found) float64 {
+		if near == nil || f.Lat == nil {
+			return 1e12
+		}
+		return store.Meters(near[0], near[1], *f.Lat, *f.Lng)
+	}
+	order := func(list []Found) []Found {
+		sort.SliceStable(list, func(i, j int) bool {
+			vi, vj := list[i].Kind != "other", list[j].Kind != "other"
+			if vi != vj {
+				return vi
+			}
+			return dist(list[i]) < dist(list[j])
+		})
+		if len(list) > 6 {
+			list = list[:6]
+		}
+		return list
+	}
+	if near != nil {
+		d := 0.25
+		if list := run(url.Values{"viewbox": {fmt.Sprintf("%.4f,%.4f,%.4f,%.4f", near[1]-d, near[0]+d, near[1]+d, near[0]-d)}, "bounded": {"1"}}); len(list) > 0 {
+			list = order(list)
+			return &list[0], nil
+		}
+		// the person's country, from where they are (rounded, so it is cached)
+		if here, err := s.reverse(ctx, math.Round(near[0]*100)/100, math.Round(near[1]*100)/100); err == nil && here.Country != "" {
+			if list := run(url.Values{"countrycodes": {strings.ToLower(here.Country)}}); len(list) > 0 {
+				list = order(list)
+				if len(list) == 1 {
+					return &list[0], nil
+				}
+				return nil, list
+			}
+		}
+	}
+	list := order(run(nil))
+	if len(list) == 1 {
+		return &list[0], nil
+	}
+	return nil, list
 }
 
 // reverse is the address at a spot.
@@ -268,9 +355,16 @@ var (
 	reURL    = regexp.MustCompile(`https?://\S+`)
 )
 
+// isGoogle is a Google host: google.com, google.ba, maps.app.goo.gl, share.google…
+func isGoogle(host string) bool {
+	return strings.Contains(host, "google.") || strings.HasSuffix(host, ".google") || host == "share.google" || strings.Contains(host, "goo.gl")
+}
+
 // parseMapLink reads the name and the spot out of a map link, without the
-// internet: Google Maps (…/place/Name/@lat,lng…!3dlat!4dlng, ?q=lat,lng),
-// Apple Maps (?q=Name&ll=lat,lng) and OpenStreetMap (#map=z/lat/lng).
+// internet: Google Maps (…/place/Name/@lat,lng…!3dlat!4dlng, ?q=lat,lng,
+// /maps/search/Name), a Google search a share.google link opens (?q=Name),
+// Apple Maps (?q=Name&ll=lat,lng, ?name=…&coordinate=…) and OpenStreetMap
+// (#map=z/lat/lng).
 func parseMapLink(raw string) Found {
 	f := Found{}
 	raw = strings.TrimSpace(raw)
@@ -297,10 +391,14 @@ func parseMapLink(raw string) Found {
 	}
 	full, _ := url.PathUnescape(u.Path)
 	switch {
-	case strings.Contains(u.Host, "google.") || strings.Contains(u.Host, "goo.gl"):
-		if i := strings.Index(full, "/place/"); i >= 0 {
-			name := strings.SplitN(full[i+7:], "/", 2)[0]
-			f.Name = strings.TrimSpace(strings.ReplaceAll(name, "+", " "))
+	case isGoogle(u.Host):
+		for _, seg := range []string{"/place/", "/maps/search/"} {
+			if i := strings.Index(full, seg); i >= 0 && f.Name == "" {
+				name := strings.SplitN(full[i+len(seg):], "/", 2)[0]
+				if !strings.HasPrefix(name, "@") && rePair.FindStringSubmatch(name) == nil {
+					f.Name = strings.TrimSpace(strings.ReplaceAll(name, "+", " "))
+				}
+			}
 		}
 		if m := reBang.FindStringSubmatch(raw); m != nil {
 			setLL(m[1], m[2])
@@ -317,7 +415,7 @@ func parseMapLink(raw string) Found {
 				f.Name = v
 			}
 		}
-	case strings.Contains(u.Host, "apple.com"):
+	case strings.Contains(u.Host, "apple.com") || u.Host == "maps.apple":
 		f.Name = firstNonEmpty(u.Query().Get("q"), u.Query().Get("name"))
 		for _, k := range []string{"ll", "coordinate", "sll"} {
 			if m := rePair.FindStringSubmatch(u.Query().Get(k)); m != nil {
@@ -339,10 +437,16 @@ func parseMapLink(raw string) Found {
 	return f
 }
 
-// expandLink follows a short link (maps.app.goo.gl, goo.gl/maps) to the long one.
+// shortHosts are share links that only redirect to the real map link.
+var shortHosts = map[string]bool{"maps.app.goo.gl": true, "goo.gl": true, "g.co": true, "share.google": true, "maps.apple": true}
+
+// expandLink follows a short link (maps.app.goo.gl, share.google, maps.apple)
+// to the long one. It only follows redirects: it stops as soon as the link
+// is a Google Maps page, a Google search or an Apple Maps page, and never
+// reads those pages.
 func (s *Server) expandLink(ctx context.Context, raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || (u.Host != "maps.app.goo.gl" && u.Host != "goo.gl" && u.Host != "g.co" && !strings.HasSuffix(u.Host, ".page.link")) {
+	if err != nil || (!shortHosts[u.Host] && !strings.HasSuffix(u.Host, ".page.link")) {
 		return raw
 	}
 	final := raw
@@ -351,7 +455,7 @@ func (s *Server) expandLink(ctx context.Context, raw string) string {
 		if len(via) > 8 {
 			return errors.New("too many redirects")
 		}
-		if strings.Contains(req.URL.Host, "google.") && strings.Contains(req.URL.Path, "/maps") {
+		if (isGoogle(req.URL.Host) && (strings.Contains(req.URL.Path, "/maps") || req.URL.Path == "/search")) || req.URL.Host == "maps.apple.com" {
 			return http.ErrUseLastResponse
 		}
 		return nil
@@ -370,12 +474,21 @@ func (s *Server) expandLink(ctx context.Context, raw string) string {
 	return final
 }
 
+func hostOf(link string) string {
+	u, err := url.Parse(link)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
 // handleResolve reads a pasted map link or "lat,lng": the name, the spot and,
 // online, the address from OpenStreetMap.
 func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var in struct {
 		Text string `json:"text"`
+		Near string `json:"near"` // where the person is: "San Remo" is the one in town
 	}
 	if err := decode(r, &in); err != nil || strings.TrimSpace(in.Text) == "" || len(in.Text) > 4000 {
 		writeErr(w, http.StatusBadRequest, "paste a map link")
@@ -391,10 +504,18 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	f := parseMapLink(text)
-	if f.MapURL == "" {
+	if f.MapURL == "" || isGoogle(hostOf(f.MapURL)) && !strings.Contains(f.MapURL, "/maps") {
 		if m := reURL.FindString(in.Text); m != "" {
-			f.MapURL = m
+			f.MapURL = m // keep the link the person shared, not a search page
 		}
+	}
+	// the iPhone share sheet puts the name before the link
+	if rest := strings.TrimSpace(reURL.ReplaceAllString(in.Text, "")); f.Name == "" && rest != "" && len(rest) <= 120 && rePair.FindStringSubmatch(rest) == nil {
+		f.Name = strings.TrimSpace(strings.SplitN(rest, "\n", 2)[0])
+	}
+	var near *[2]float64
+	if lat, lng, ok := latLng(in.Near); ok {
+		near = &[2]float64{lat, lng}
 	}
 	if m := reOSMObj.FindStringSubmatch(text); m != nil && on {
 		var res []nomPlace
@@ -409,6 +530,7 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": "No place found in that link. Copy the link from the place's Share button, or type the name."})
 		return
 	}
+	choices := []Found{}
 	if on {
 		var got *Found
 		switch {
@@ -431,8 +553,13 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 		case f.Lat != nil:
 			got, _ = s.reverse(cctx, *f.Lat, *f.Lng)
 		default:
-			if list, err := s.search(cctx, f.Name, nil); err == nil && len(list) > 0 {
-				got = &list[0]
+			// only a name (a share.google link): the one near the person, else
+			// the places of that name to pick from
+			var best *Found
+			best, choices = s.findByName(cctx, f.Name, near)
+			got = best
+			for i := range choices {
+				choices[i].MapURL = firstNonEmpty(f.MapURL, choices[i].MapURL)
 			}
 		}
 		if got != nil {
@@ -446,5 +573,5 @@ func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
 			f = *got
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "place": f, "offline": !on})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "place": f, "choices": choices, "offline": !on})
 }

@@ -319,11 +319,20 @@ func TestParseMapLink(t *testing.T) {
 		{"https://maps.apple.com/?q=Kafeterija&ll=43.85925,18.42838", "Kafeterija", 43.85925, 18.42838},
 		{"https://www.openstreetmap.org/#map=19/43.85972/18.43069", "", 43.85972, 18.43069},
 		{"43.85972, 18.43069", "", 43.85972, 18.43069},
+		{"https://www.google.com/maps/search/Kafeterija/@43.85925,18.42838,17z", "Kafeterija", 43.85925, 18.42838},
+		{"https://maps.apple.com/place?address=Sarajevo&coordinate=43.85925,18.42838&name=Kafeterija", "Kafeterija", 43.85925, 18.42838},
 	} {
 		f := parseMapLink(c.in)
 		if f.Name != c.name || f.Lat == nil || *f.Lat != c.lat || *f.Lng != c.lng {
 			t.Errorf("parseMapLink(%q) = %q %v %v", c.in, f.Name, f.Lat, f.Lng)
 		}
+	}
+	// a share.google link ends on a Google search for the place: only the name
+	if f := parseMapLink("https://www.google.com/search?kgmid=/g/1yghbv_df&q=San+Remo&shndl=30"); f.Name != "San Remo" || f.Lat != nil {
+		t.Errorf("google search: %q %v", f.Name, f.Lat)
+	}
+	if !isGoogle("share.google") || !isGoogle("www.google.ba") || !isGoogle("maps.app.goo.gl") || isGoogle("example.com") {
+		t.Error("isGoogle")
 	}
 	if f := parseMapLink("not a link"); f.Lat != nil || f.Name != "" {
 		t.Errorf("text: %v", f)

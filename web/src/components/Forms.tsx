@@ -89,11 +89,11 @@ export function PlaceModal({ place, preset, onClose, onSaved }: { place?: Place;
           <Field label="Name"><input value={f.name} onChange={e => set({ name: e.target.value })} required maxLength={200} autoFocus={!!place} placeholder="Kafeterija" /></Field>
           <Field group label="Kind of place"><Select ariaLabel="Kind" value={f.kind} onChange={v => set({ kind: v })} options={KINDS.map(k => ({ value: k.value, label: k.label }))} /></Field>
         </div>
-        <div className="two-col tight">
+        <div className="two-col">
           <Field group label="Have you been?"><Segmented value={f.status} onChange={v => set({ status: v })} options={[{ value: 'want', label: 'Want to go' }, { value: 'been', label: 'Been there' }]} /></Field>
           <Field group label="Price" className="price-pick"><Segmented value={f.price} onChange={v => set({ price: v })} options={[{ value: 0, label: '?' }, { value: 1, label: '€' }, { value: 2, label: '€€' }, { value: 3, label: '€€€' }, { value: 4, label: '€€€€' }]} /></Field>
         </div>
-        {f.status === 'been' && <div className="two-col tight">
+        {f.status === 'been' && <div className="two-col">
           <Field group label="Your rating" help={place?.visits ? 'Rating a visit updates this to the average of your visits.' : undefined}><Stars value={f.rating} onChange={v => set({ rating: v })} /></Field>
           <label className="check-row self-end"><input type="checkbox" checked={f.favourite} onChange={e => set({ favourite: e.target.checked })} /><Icon name="heart" size={14} />One of my favourites</label>
         </div>}
@@ -104,8 +104,8 @@ export function PlaceModal({ place, preset, onClose, onSaved }: { place?: Place;
           <Field label="Country code" help="BA, AT, PT…"><input value={f.country} onChange={e => set({ country: e.target.value.toUpperCase().slice(0, 2) })} maxLength={2} /></Field>
         </div>
         <div className="stack tight">
+          <span className="small muted">{f.lat != null ? `On the map at ${f.lat.toFixed(5)}, ${f.lng!.toFixed(5)}` : 'Not on the map yet: find it above, or pick the spot.'}</span>
           <div className="row wrap">
-            <span className="small muted grow">{f.lat != null ? `On the map at ${f.lat.toFixed(5)}, ${f.lng!.toFixed(5)}` : 'Not on the map yet: find it above, or tap the map.'}</span>
             <button type="button" className="btn sm" onClick={() => setMapOpen(o => !o)}><Icon name="map" size={14} />{mapOpen ? 'Hide the map' : f.lat != null ? 'Move the pin' : 'Pick on the map'}</button>
             <button type="button" className="btn sm" onClick={here}><Icon name="navigation" size={14} />I'm here</button>
             {f.lat != null && <button type="button" className="btn sm ghost" onClick={() => set({ lat: null, lng: null })}>Remove</button>}
@@ -149,10 +149,11 @@ function FindPlace({ onFound, near }: { onFound: (f: Found) => void; near: { lat
   const [q, setQ] = useState('')
   const dq = useDebounce(q.trim(), 500)
   const [items, setItems] = useState<Found[] | null>(null)
+  const [choices, setChoices] = useState<Found[] | null>(null) // a link gave only a name: which one?
   const [busy, setBusy] = useState(false)
   const [me, setMe] = useState(near)
   useEffect(() => { if (!me) whereAmI(4000).then(setMe) }, []) // eslint-disable-line react-hooks/exhaustive-deps
-  const isLink = /^https?:\/\/|^-?\d{1,2}\.\d+\s*,\s*-?\d{1,3}\.\d+$/.test(dq)
+  const isLink = /https?:\/\/\S+|^-?\d{1,2}\.\d+\s*,\s*-?\d{1,3}\.\d+$/.test(dq)
   const online = !!settings?.online && !settings.online_blocked
   useEffect(() => {
     if (!dq || isLink || !online || dq.length < 3) { setItems(null); return }
@@ -165,17 +166,26 @@ function FindPlace({ onFound, near }: { onFound: (f: Found) => void; near: { lat
   const resolve = async () => {
     setBusy(true)
     try {
-      const r = await api.post<{ ok: boolean; error?: string; place?: Found }>(`${V1}/resolve`, { text: q })
+      const r = await api.post<{ ok: boolean; error?: string; place?: Found; choices?: Found[] }>(`${V1}/resolve`, { text: q, near: me ? `${me.lat},${me.lng}` : '' })
       if (!r.ok || !r.place) toast(r.error || 'Nothing found in that link', 'err')
-      else { onFound(r.place); setQ(''); toast(r.place.name ? `Found ${r.place.name}` : 'Found the spot') }
+      else if (r.choices?.length) { onFound(r.place); setChoices(r.choices); setQ(''); toast(`Found ${r.place.name}. Which one is it? Pick it below.`) }
+      else { onFound(r.place); setQ(''); toast(r.place.lat != null ? (r.place.name ? `Found ${r.place.name}` : 'Found the spot') : `Found the name; add the address or pick the spot on the map`) }
     } catch (e) { toast(errMsg(e), 'err') } finally { setBusy(false) }
   }
   useEffect(() => { if (isLink && dq) resolve() }, [dq]) // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="stack tight">
       <Field label="Find it" help={online ? 'Type the name and the town, or paste a link from Google Maps or Apple Maps.' : 'Paste a link from Google Maps or Apple Maps. Looking names up online is off (Settings → General).'}>
-        <div className="row"><input value={q} onChange={e => setQ(e.target.value)} placeholder={online ? 'Kafeterija Sarajevo, or a maps link' : 'A maps link'} autoFocus />{busy && <span className="spinner" />}</div>
+        <div className="row"><input value={q} onChange={e => { setQ(e.target.value); setChoices(null) }} placeholder={online ? 'Kafeterija Sarajevo, or a maps link' : 'A maps link'} autoFocus />{busy && <span className="spinner" />}</div>
       </Field>
+      {choices && choices.length > 0 && <div className="stack tight">
+        <span className="small muted">Places called {choices[0].name || 'that'}, nearest first:</span>
+        <div className="found-list">{choices.map((x, i) => (
+          <button key={i} type="button" className="found-row" onClick={() => { onFound(x); setChoices(null) }}>
+            <KindBadge kind={x.kind} size={28} />
+            <span className="grow"><b>{x.name}</b><small>{x.label}</small></span>
+          </button>))}</div>
+      </div>}
       {items && items.length > 0 && <div className="found-list">{items.map((x, i) => (
         <button key={i} type="button" className="found-row" onClick={() => { onFound(x); setItems(null); setQ('') }}>
           <KindBadge kind={x.kind} size={28} />

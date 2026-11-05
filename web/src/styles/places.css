@@ -329,7 +329,6 @@ a.list-tag:hover { background: var(--hover); color: var(--text); }
 .found-row { display: flex; gap: 10px; align-items: flex-start; text-align: left; font: inherit; color: inherit; background: none; border: 0; padding: 8px; border-radius: 8px; cursor: pointer; }
 .found-row:hover, .found-row:focus-visible { background: var(--hover); }
 .found-row small { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; margin-top: 1px; }
-.price-pick .segmented button { min-width: 44px; }
 .callout.info.trip { align-items: flex-start; }
 @media (max-width: 640px) {
   .pmap { height: 320px; border-radius: 12px; }
@@ -344,3 +343,8 @@ a.list-tag:hover { background: var(--hover); color: var(--text); }
 .list-row .list-row { border-top: 0; }
 .price { letter-spacing: 0; }
 .self-end { align-self: end; padding-bottom: 8px; }
+/* forms never wider than the phone: choices fill the row, the dialog never scrolls sideways */
+.modal-body { overflow-x: hidden; }
+.form-grid .segmented { display: flex; max-width: 100%; }
+.form-grid .segmented button { flex: 1 1 0; min-width: 0; padding: 0 6px; }
+.price-pick .segmented button { min-width: 0; }
