@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -337,7 +339,22 @@ func (s *Server) handleTripGuide(w http.ResponseWriter, r *http.Request) {
 		visits, _, _ = s.store.ListVisits(ctx, uid, store.VisitFilter{TripID: tripID, Oldest: true})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"trip_id": tripID, "lists": lists, "want": want, "been": been, "visits": visits, "spent": spentOf(visits),
-		"url": s.cfg.BaseURL + "/places?trip=" + itoa(tripID)})
+		"url": s.cfg.BaseURL + tripPlacesPath(lists, lat, lng, dest)})
+}
+
+// tripPlacesPath is the page in Places with a trip's places: its one list,
+// else the places around its spot, else the places in the town it names.
+func tripPlacesPath(lists []store.List, lat, lng *float64, dest string) string {
+	label := strings.TrimSpace(strings.SplitN(dest, ",", 2)[0])
+	switch {
+	case len(lists) == 1:
+		return "/lists/" + itoa(lists[0].ID)
+	case lat != nil && lng != nil:
+		return fmt.Sprintf("/places?near=%.5f,%.5f&radius_km=40&sort=near&label=%s", *lat, *lng, url.QueryEscape(label))
+	case label != "":
+		return "/places?q=" + url.QueryEscape(label)
+	}
+	return "/places"
 }
 
 // handleSpending is what visits cost between two days, per currency and month.
