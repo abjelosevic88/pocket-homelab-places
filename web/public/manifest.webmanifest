@@ -1,0 +1,21 @@
+{
+  "name": "Pocket Places",
+  "short_name": "Places",
+  "description": "The places you love and the ones you want to try: lists, a map, ratings, visits and what they cost.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#c5352c",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "/apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ],
+  "shortcuts": [
+    { "name": "Add a place", "url": "/?add=place" },
+    { "name": "Log a visit", "url": "/?add=visit" },
+    { "name": "Map", "url": "/map" }
+  ]
+}
