@@ -467,16 +467,35 @@ func (s *Server) importPocket(ctx context.Context, uid int64, doc exportDoc) map
 			remember("place", old, prev.ID)
 			continue
 		}
+		if same := s.samePlace(ctx, uid, &p); same > 0 {
+			// already here (the person's own file back on the same box)
+			remember("place", old, same)
+			counts["already there"]++
+			continue
+		}
 		if err := s.store.CreatePlace(ctx, uid, &p); err == nil {
 			remember("place", old, p.ID)
 			counts["places"]++
 		}
 	}
+	mine, _ := s.store.ListLists(ctx, uid)
 	for _, l := range doc.Lists {
 		if id, ok := idOf("list", l.ID); ok && exists("lists", id) {
 			continue
 		}
 		old := l.ID
+		same := int64(0)
+		for _, m := range mine {
+			if strings.EqualFold(strings.TrimSpace(m.Name), strings.TrimSpace(l.Name)) {
+				same = m.ID
+				break
+			}
+		}
+		if same > 0 {
+			// a list of that name is here already: the places join it
+			remember("list", old, same)
+			continue
+		}
 		if err := s.store.CreateList(ctx, uid, &l); err == nil {
 			remember("list", old, l.ID)
 			counts["lists"]++
@@ -498,6 +517,9 @@ func (s *Server) importPocket(ctx context.Context, uid int64, doc exportDoc) map
 			counts["skipped"]++
 			continue
 		}
+		if s.sameVisit(ctx, uid, pid, &v) {
+			continue
+		}
 		old := v.ID
 		v.PlaceID, v.Source, v.SourceRef = pid, "import", fmt.Sprintf("pocket:%d", old)
 		v.MoneyTxID, v.MoneyBooked, v.SplitGroupID, v.SplitExpenseID, v.CalEventID = nil, false, nil, nil, nil
@@ -507,4 +529,37 @@ func (s *Server) importPocket(ctx context.Context, uid int64, doc exportDoc) map
 		}
 	}
 	return counts
+}
+
+// samePlace is the person's place with the same name within 80 m of p (or,
+// with no spot on either, in the same town), or 0.
+func (s *Server) samePlace(ctx context.Context, uid int64, p *store.Place) int64 {
+	if p.HasCoords() {
+		near, _ := s.store.ListPlaces(ctx, uid, store.PlaceFilter{Near: &[2]float64{*p.Lat, *p.Lng}, Radius: 80})
+		for _, x := range near {
+			if store.Fold(x.Name) == store.Fold(p.Name) {
+				return x.ID
+			}
+		}
+		return 0
+	}
+	all, _ := s.store.ListPlaces(ctx, uid, store.PlaceFilter{})
+	for _, x := range all {
+		if !x.HasCoords() && store.Fold(x.Name) == store.Fold(p.Name) && store.Fold(x.City) == store.Fold(p.City) {
+			return x.ID
+		}
+	}
+	return 0
+}
+
+// sameVisit reports whether the place already has this visit (same day,
+// planned or not).
+func (s *Server) sameVisit(ctx context.Context, uid, placeID int64, v *store.Visit) bool {
+	have, _, _ := s.store.ListVisits(ctx, uid, store.VisitFilter{PlaceID: placeID, From: v.Date, To: v.Date})
+	for _, x := range have {
+		if x.Date == v.Date && x.Planned == v.Planned {
+			return true
+		}
+	}
+	return false
 }

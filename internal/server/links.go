@@ -21,6 +21,21 @@ var linkOffers = []core.Offer{
 	{Scope: "places:write", Name: "Add places and visits", Description: "Add a place to your list and log or plan a visit (\"save this restaurant\", \"we had dinner there\"). It may change or remove only the places and visits that app added itself."},
 }
 
+// portable is what Pocket Move may copy out and bring in (docs/move.md in
+// pocket-homelab-core). Imports add; what came in before is skipped, so a
+// second run of the same file adds nothing.
+var portable = &core.Portable{
+	Exports: []core.PortableExport{
+		{Path: "/api/v1/export.json", File: "places.json", Kind: core.KindPocket, Title: "Every place with its visits and lists"},
+		{Path: "/api/v1/export.csv", File: "places.csv", Kind: core.KindCSV, Title: "Every place as a table"},
+	},
+	Imports: []core.PortableImport{
+		{Path: "/api/v1/import", Kind: core.KindPocket, Form: "file", Title: "Adds the places, visits and lists from another box; what came in before is left alone"},
+		{Path: "/api/v1/import", Kind: core.KindPlaces, Form: "file", Title: "Adds Google Maps saved places (Saved Places.json, Reviews.json) to the list named in the form field \"list\" (default \"Google Maps\"); places already here are skipped"},
+		{Path: "/api/v1/import/csv", Kind: core.KindCSV, Form: "file", Title: "Adds a Google Maps saved list (Title, Note, URL, Comment) as the list named in the form field \"list\" (else the file name), or any CSV with a name column; places already here are skipped"},
+	},
+}
+
 type linkRoute struct {
 	methods string
 	path    *regexp.Regexp
@@ -39,6 +54,9 @@ var errLinkScope = errors.New("outside the link's scope")
 
 // linkAllows reports whether a link token with these scopes may make this request.
 func linkAllows(scopes []string, r *http.Request) bool {
+	if portable.LinkAllows(scopes, r) {
+		return true
+	}
 	for _, lr := range linkRoutes {
 		if !strings.Contains(" "+lr.methods+" ", " "+r.Method+" ") || !lr.path.MatchString(r.URL.Path) {
 			continue

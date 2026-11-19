@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,16 +31,23 @@ import (
 var csvColumns = []string{"name", "kind", "status", "rating", "price", "cuisine", "address", "city", "country", "lat", "lng", "website", "phone", "map_url",
 	"tags", "favourite", "notes", "visits", "last_visit"}
 
+// googleList is the list Google Maps places land on when Pocket Move brings
+// them in without naming one.
+const googleList = "Google Maps"
+
 // handleImport takes a JSON file: a Pocket Places export, or Google
-// Takeout's Saved Places / Reviews (GeoJSON).
+// Takeout's Saved Places / Reviews (GeoJSON). As the raw body (this app's
+// page, ?list= optional) or the multipart field "file" (Pocket Move: the
+// form field "list", default "Google Maps").
 func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	uid := actorID(ctx)
-	body, err := s.readBody(r)
+	up, err := s.readUpload(r)
 	if err != nil {
-		writeErr(w, http.StatusRequestEntityTooLarge, "the file is too big")
+		writeErr(w, http.StatusBadRequest, "the file is missing or too big")
 		return
 	}
+	body := up.body
 	var probe struct {
 		App  string `json:"app"`
 		Type string `json:"type"`
@@ -57,7 +65,11 @@ func (s *Server) handleImport(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, s.importPocket(ctx, uid, doc))
 	case strings.EqualFold(probe.Type, "FeatureCollection"):
-		counts, err := s.importGeoJSON(r, uid, body)
+		list := up.list
+		if list == "" && up.multipart {
+			list = googleList
+		}
+		counts, err := s.importGeoJSON(r, uid, body, list)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -78,6 +90,7 @@ type googleFeature struct {
 	Properties struct {
 		// 2023 and later
 		Date     string `json:"date"`
+		Name     string `json:"name"`
 		MapsURL  string `json:"google_maps_url"`
 		Location struct {
 			Name        string `json:"name"`
@@ -104,7 +117,7 @@ type googleFeature struct {
 	} `json:"properties"`
 }
 
-func (s *Server) importGeoJSON(r *http.Request, uid int64, body []byte) (map[string]int, error) {
+func (s *Server) importGeoJSON(r *http.Request, uid int64, body []byte, listName string) (map[string]int, error) {
 	ctx := r.Context()
 	var fc struct {
 		Features []googleFeature `json:"features"`
@@ -112,7 +125,6 @@ func (s *Server) importGeoJSON(r *http.Request, uid int64, body []byte) (map[str
 	if err := json.Unmarshal(body, &fc); err != nil {
 		return nil, fmt.Errorf("invalid GeoJSON")
 	}
-	listName := strings.TrimSpace(r.URL.Query().Get("list"))
 	var listID int64
 	if listName != "" {
 		listID = s.listNamed(r, uid, listName)
@@ -120,7 +132,7 @@ func (s *Server) importGeoJSON(r *http.Request, uid int64, body []byte) (map[str
 	counts := map[string]int{}
 	for _, f := range fc.Features {
 		pr := f.Properties
-		name := firstNonEmpty(pr.Location.Name, pr.OldLoc.Business, pr.Title)
+		name := firstNonEmpty(pr.Location.Name, pr.OldLoc.Business, pr.Title, pr.Name)
 		mapsURL := firstNonEmpty(pr.MapsURL, pr.OldURL)
 		p := store.Place{Name: name, Address: firstNonEmpty(pr.Location.Address, pr.OldLoc.Address), Country: firstNonEmpty(pr.Location.CountryCode, pr.OldLoc.Country),
 			MapURL: mapsURL, Kind: "other", Status: store.StatusWant, Source: "google"}
@@ -150,6 +162,10 @@ func (s *Server) importGeoJSON(r *http.Request, uid int64, body []byte) (map[str
 		}
 		p.SourceRef = googleRef(mapsURL, p)
 		created, id := s.importPlace(r, uid, &p)
+		if id == 0 {
+			counts["skipped"]++
+			continue
+		}
 		if created {
 			counts["places"]++
 		} else {
@@ -240,13 +256,8 @@ func (s *Server) importPlace(r *http.Request, uid int64, p *store.Place) (bool, 
 			return false, old.ID
 		}
 	}
-	if p.HasCoords() {
-		near, _ := s.store.ListPlaces(ctx, uid, store.PlaceFilter{Near: &[2]float64{*p.Lat, *p.Lng}, Radius: 80})
-		for _, x := range near {
-			if store.Fold(x.Name) == store.Fold(p.Name) {
-				return false, x.ID
-			}
-		}
+	if same := s.samePlace(ctx, uid, p); same > 0 {
+		return false, same
 	}
 	if err := s.store.CreatePlace(ctx, uid, p); err != nil {
 		return false, 0
@@ -273,17 +284,18 @@ func (s *Server) listNamed(r *http.Request, uid int64, name string) int64 {
 var reGooglePlace = regexp.MustCompile(`/maps/place/([^/]+)`)
 
 // handleImportCSV takes a CSV: a Google Maps saved list (Title, Note, URL…)
-// — it becomes a list named after the file (?list=Want to go) — or any CSV
-// with a header row naming its columns.
+// — it becomes a list named after the file (?list=Want to go, or the form
+// field "list" next to the multipart "file", else that file's name) — or
+// any CSV with a header row naming its columns.
 func (s *Server) handleImportCSV(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	uid := actorID(ctx)
-	body, err := s.readBody(r)
+	up, err := s.readUpload(r)
 	if err != nil {
-		writeErr(w, http.StatusRequestEntityTooLarge, "the file is too big")
+		writeErr(w, http.StatusBadRequest, "the file is missing or too big")
 		return
 	}
-	body = bytes.TrimPrefix(body, []byte("\xef\xbb\xbf"))
+	body := bytes.TrimPrefix(up.body, []byte("\xef\xbb\xbf"))
 	cr := csv.NewReader(bytes.NewReader(body))
 	cr.FieldsPerRecord = -1
 	cr.LazyQuotes = true
@@ -312,7 +324,11 @@ func (s *Server) handleImportCSV(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "the first row should name the columns: name, address, city, lat, lng… (or a Google Maps list: Title, Note, URL)")
 		return
 	}
-	listName := strings.TrimSpace(strings.TrimSuffix(r.URL.Query().Get("list"), ".csv"))
+	listName := up.list
+	if listName == "" && up.filename != "" {
+		listName = path.Base(strings.ReplaceAll(up.filename, "\\", "/"))
+	}
+	listName = strings.TrimSpace(strings.TrimSuffix(listName, ".csv"))
 	status := store.StatusWant
 	fav := false
 	switch strings.ToLower(listName) {

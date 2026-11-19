@@ -134,6 +134,7 @@ func (s *Server) Router() http.Handler {
 			r.Get("/export.csv", s.handleExportCSV)
 			r.Post("/import", s.handleImport)
 			r.Post("/import/csv", s.handleImportCSV)
+			r.Get(strings.TrimPrefix(core.PortablePath, "/api/v1"), portable.Handler())
 		})
 	})
 
@@ -188,6 +189,35 @@ func (s *Server) fail(w http.ResponseWriter, err error, context string) {
 
 func (s *Server) readBody(r *http.Request) ([]byte, error) {
 	return io.ReadAll(http.MaxBytesReader(nil, r.Body, s.cfg.MaxBodyBytes))
+}
+
+// upload is an import's file: the raw body (the app's own page) or the
+// multipart field "file" (Pocket Move), with the list it goes on: ?list= or
+// the form field "list".
+type upload struct {
+	body      []byte
+	list      string
+	filename  string // multipart only
+	multipart bool
+}
+
+func (s *Server) readUpload(r *http.Request) (upload, error) {
+	if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/") {
+		b, err := s.readBody(r)
+		return upload{body: b, list: strings.TrimSpace(r.URL.Query().Get("list"))}, err
+	}
+	r.Body = http.MaxBytesReader(nil, r.Body, s.cfg.MaxBodyBytes)
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		return upload{}, err
+	}
+	f, hdr, err := r.FormFile("file")
+	if err != nil {
+		return upload{}, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(f)
+	list := strings.TrimSpace(firstNonEmpty(r.FormValue("list"), r.URL.Query().Get("list")))
+	return upload{body: b, list: list, filename: hdr.Filename, multipart: true}, err
 }
 
 func decode(r *http.Request, v any) error {
