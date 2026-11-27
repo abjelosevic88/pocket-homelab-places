@@ -285,9 +285,20 @@ func CleanRating(r float64) float64 {
 
 // CreatePlace adds a place.
 func (s *Store) CreatePlace(ctx context.Context, uid int64, p *Place) error {
+	return s.CreatePlaceThen(ctx, uid, p, nil)
+}
+
+// CreatePlaceThen adds a place and runs then in the same transaction, with
+// the place's id known (a receipt that must be kept with it, or not at all).
+func (s *Store) CreatePlaceThen(ctx context.Context, uid int64, p *Place, then func(tx *sql.Tx) error) error {
 	p.clean()
 	now := Now()
-	res, err := s.DB.ExecContext(ctx, `INSERT INTO places (user_id, name, kind, cuisine, status, favourite, closed, rating, price, address, city, country, lat, lng,
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO places (user_id, name, kind, cuisine, status, favourite, closed, rating, price, address, city, country, lat, lng,
 		phone, website, map_url, hours, tags, notes, recommended_by, contact_id, currency, source, source_ref, created_at, updated_at)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		uid, p.Name, p.Kind, p.Cuisine, p.Status, boolInt(p.Favourite), boolInt(p.Closed), p.Rating, p.Price, p.Address, p.City, p.Country, nullF(p.Lat), nullF(p.Lng),
@@ -297,10 +308,44 @@ func (s *Store) CreatePlace(ctx context.Context, uid int64, p *Place) error {
 	}
 	p.ID, _ = res.LastInsertId()
 	p.UserID, p.CreatedAt, p.UpdatedAt = uid, now, now
+	if then != nil {
+		if err := then(tx); err != nil {
+			p.ID = 0
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		p.ID = 0
+		return err
+	}
 	if p.Lists == nil {
 		p.Lists = []int64{}
 	}
 	return nil
+}
+
+// WantToTry are the places a person wants to try and has not seen close for
+// good, the newest first (at most limit), and how many there are in all.
+func (s *Store) WantToTry(ctx context.Context, uid int64, limit int) ([]Place, int, error) {
+	var total int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(1) FROM places WHERE user_id = ? AND status = 'want' AND closed = 0`, uid).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+placeCols+` FROM places p WHERE p.user_id = ? AND p.status = 'want' AND p.closed = 0
+		ORDER BY p.created_at DESC, p.id DESC LIMIT ?`, Today(), uid, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []Place{}
+	for rows.Next() {
+		p, err := scanPlace(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, p)
+	}
+	return out, total, rows.Err()
 }
 
 // UpdatePlace saves a place.

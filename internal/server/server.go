@@ -32,8 +32,9 @@ type Server struct {
 	requests atomic.Int64
 	errors   atomic.Int64
 
-	calMu   sync.Mutex // one calendar change at a time
-	moneyMu sync.Mutex // Pocket Money bookings are serialized
+	calMu     sync.Mutex // one calendar change at a time
+	moneyMu   sync.Mutex // Pocket Money bookings are serialized
+	captureMu sync.Mutex // quick lines from other apps are kept one at a time
 
 	oidcMu sync.Mutex
 	oidc   *oidcProvider // for the issuer in use; rebuilt when it changes
@@ -210,10 +211,12 @@ func (s *Server) registerWithCore(ctx context.Context) error {
 		Description: "The places you love and the ones you want to try: restaurants, cafés, bars, museums, parks and beaches on a list and a map, with your ratings, notes and price, your own lists (date night, a trip), every visit with who came and what it cost, and \"how was it?\" when Pocket Movement or Pocket Money notice you were there.",
 		Icon:        "/favicon.svg", Version: Version,
 		URL: s.cfg.CoreAppURL, PublicURL: s.cfg.BaseURL, HealthPath: "/healthz", EnvPrefix: "PLACES",
-		Publishes: eventTopics,
-		Offers:    linkOffers,
-		Uses:      append(linkUses(), core.InferenceUse()),
-		Portable:  portable,
+		Publishes:    eventTopics,
+		Offers:       linkOffers,
+		Uses:         append(linkUses(), core.InferenceUse()),
+		Portable:     portable,
+		Category:     "Places",
+		Capabilities: capabilities,
 	}
 	if s.cfg.BaseURL != "" {
 		m.OIDC = &core.OIDCRequest{RedirectURIs: []string{s.oidcCallbackURL()}}

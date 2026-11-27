@@ -135,6 +135,12 @@ func (s *Server) Router() http.Handler {
 			r.Post("/import", s.handleImport)
 			r.Post("/import/csv", s.handleImportCSV)
 			r.Get(strings.TrimPrefix(core.PortablePath, "/api/v1"), portable.Handler())
+
+			// the capabilities (capabilities.go): Pocket Search, Day and Hub
+			r.Get("/pocket/search", core.SearchHandler(s.pocketSearch))
+			r.Get("/pocket/day/{date}", core.DayHandler(s.pocketDay))
+			r.Get("/pocket/widget", core.WidgetHandler(s.pocketWidget))
+			r.Post("/pocket/capture", capabilities.Capture.CaptureHandler(s.pocketCapture))
 		})
 	})
 
